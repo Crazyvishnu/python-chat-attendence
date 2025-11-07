@@ -2,22 +2,18 @@ name: Check College Attendance
 
 on:
   schedule:
-    - cron: '0 3 * * *'    # 8:30 AM IST (03:00 UTC)
-    - cron: '0 11 * * *'   # 4:30 PM IST (11:00 UTC)
-  workflow_dispatch:
-
-permissions:
-  contents: read
+    - cron: '0 3 * * *'    # 8:30 AM IST
+    - cron: '0 11 * * *'   # 4:30 PM IST
+  workflow_dispatch:       # allows manual trigger
 
 jobs:
   attendance:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -25,7 +21,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Attendance Script
+      - name: Run Attendance Bot
+        run: python main.py
         env:
           COLLEGE_USER: ${{ secrets.COLLEGE_USER }}
           COLLEGE_PASS: ${{ secrets.COLLEGE_PASS }}
@@ -33,4 +30,3 @@ jobs:
           TWILIO_TOKEN: ${{ secrets.TWILIO_TOKEN }}
           TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
           MY_PHONE_NUMBER: ${{ secrets.MY_PHONE_NUMBER }}
-        run: python main.py
