@@ -14,16 +14,38 @@ TWILIO_PHONE = os.getenv("TWILIO_PHONE_NUMBER")
 MY_PHONE = os.getenv("MY_PHONE_NUMBER")
 
 def get_attendance():
-    """Login to MGIT Winnou and scrape attendance percentage."""
     print("🌐 Opening MGIT Winnou site...")
+    driver = webdriver.Firefox()
+    driver.get("https://mgitwinnou.in/")
 
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+    print("🔐 Logging in...")
+    username = os.getenv("MGIT_USERNAME")
+    password = os.getenv("MGIT_PASSWORD")
 
-    browser = webdriver.Chrome(options=options)
-    browser.set_page_load_timeout(90)
+    driver.find_element(By.ID, "txtusername").send_keys(username)
+    driver.find_element(By.ID, "txtpassword").send_keys(password)
+    driver.find_element(By.ID, "btnSubmit").click()
+    time.sleep(3)
+
+    print("📄 Navigating to Student Info...")
+    driver.get("https://mgitwinnou.in/StudentInfo.aspx")
+    time.sleep(3)
+
+    try:
+        # Find all span elements containing attendance pattern like (72.29)
+        spans = driver.find_elements(By.TAG_NAME, "span")
+        attendance = "Not Found"
+        for span in spans:
+            text = span.text.strip()
+            if text.startswith("(") and text.endswith(")") and "." in text:
+                attendance = text.strip("()")
+                break
+    except Exception:
+        attendance = "Not Found"
+
+    print(f"🎯 Attendance Extracted: {attendance}%")
+    driver.quit()
+    return attendance
 
     try:
         browser.get("https://mgit.winnou.net/")
