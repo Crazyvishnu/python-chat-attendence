@@ -68,9 +68,8 @@ def login_and_get_html():
     return dash.text, session
 
 def is_part_of_date(text, match_start, match_end):
-    # check 5 chars before and after for - or / which indicates a date like 07-11-2025
-    before = text[max(0, match_start-5):match_start]
-    after = text[match_end:match_end+5]
+    before = text[max(0, match_start-6):match_start]
+    after = text[match_end:match_end+6]
     if "-" in before or "-" in after or "/" in before or "/" in after:
         return True
     return False
@@ -79,68 +78,89 @@ def extract_attendance(html):
     soup = BeautifulSoup(html, "html.parser")
     full_text = soup.get_text(" ", strip=True)
 
-    # 1) Prefer explicit percentages (e.g., 72.29% or 72%) anywhere on page
+    # 1) Look for explicit percent formats anywhere first (72.29% or 72%)
     pct_matches = list(re.finditer(r"(\d{1,3}(?:\.\d{1,2})?)\s*%", full_text))
     if pct_matches:
-        # if multiple, try to pick the one closest to the word "Attendance"
-        attendance_positions = [m for m in pct_matches]
-        # find index of "attendance" if exist
+        # pick the percent closest to the "Attendance" word if present
         att_idx = full_text.lower().find("attendance")
         if att_idx != -1:
-            best = min(attendance_positions, key=lambda m: abs(m.start() - att_idx))
-            return best.group(1) + "%"
+            best = min(pct_matches, key=lambda m: abs(m.start() - att_idx))
+            val = float(best.group(1))
+            if 0 <= val <= 100:
+                return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
         else:
-            # pick first or the largest sensible percent <= 100
-            cand_vals = [float(m.group(1)) for m in attendance_positions if float(m.group(1)) <= 100]
-            if cand_vals:
-                # pick the largest sensible percent (helps if stray small numbers exist)
-                val = max(cand_vals)
+            # fallback: choose the largest reasonable percent <=100
+            values = [float(m.group(1)) for m in pct_matches if float(m.group(1)) <= 100]
+            if values:
+                val = max(values)
                 return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
 
-    # 2) If no explicit %, search numbers near "Attendance" in the DOM
-    # find occurrences of the word "Attendance" (case-insensitive)
-    att_tags = []
-    for tag in soup.find_all(text=re.compile(r"Attendance", re.I)):
-        att_tags.append(tag)
-
+    # 2) Look specifically near "Attendance" labels in the DOM
+    attendance_tags = soup.find_all(text=re.compile(r"\bAttendance\b", re.I))
     candidates = []
-
-    # Search in the nearby text (parent and siblings)
-    for tag in att_tags:
+    for tag in attendance_tags:
         parent = tag.parent
-        search_scope = parent.get_text(" ", strip=True) if parent else tag
-        # find numeric candidates in that scope
-        for m in re.finditer(r"(\d{1,3}(?:\.\d{1,2})?)", search_scope):
-            start, end = m.start(), m.end()
-            # map to positions in full_text by searching substring (approx)
-            # we'll use the matched string and check if it's part of a date
-            matched_text = m.group(1)
-            # crude check: if matched_text appears in full_text near the 'attendance' index
-            idx = full_text.find(matched_text)
-            if idx != -1 and not is_part_of_date(full_text, idx, idx+len(matched_text)):
-                val = float(matched_text)
+        # search parent text and siblings for patterns
+        scope_text = parent.get_text(" ", strip=True) if parent else tag
+        # 2a) pattern like (72.29)
+        paren = re.search(r"\((\d{1,3}(?:\.\d{1,2})?)\)", scope_text)
+        if paren:
+            val = float(paren.group(1))
+            if 0 <= val <= 100:
+                return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
+
+        # 2b) explicit percent in scope
+        pct = re.search(r"(\d{1,3}(?:\.\d{1,2})?)\s*%", scope_text)
+        if pct:
+            val = float(pct.group(1))
+            if 0 <= val <= 100:
+                return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
+
+        # 2c) any number token in scope (filter out dates)
+        for m in re.finditer(r"(\d{1,3}(?:\.\d{1,2})?)", scope_text):
+            token = m.group(1)
+            # find token position in full_text (approx)
+            idx = full_text.find(token)
+            if idx != -1 and not is_part_of_date(full_text, idx, idx+len(token)):
+                val = float(token)
                 if 0 <= val <= 100:
                     candidates.append((abs(full_text.lower().find("attendance") - idx), val))
 
     if candidates:
-        # pick the closest candidate to "Attendance"
+        # choose closest candidate to the word 'Attendance'
         candidates.sort(key=lambda x: x[0])
         val = candidates[0][1]
         return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
 
-    # 3) As a fallback, scan whole page for numbers that look like percents (no % present)
-    # collect numeric tokens that are not part of dates and are sensible percentages
+    # 3) Special targeted search: numbers in parentheses anywhere (portal shows (72.29) style)
+    paren_all = list(re.finditer(r"\((\d{1,3}(?:\.\d{1,2})?)\)", full_text))
+    if paren_all:
+        # try to pick the one nearest to 'Attendance' word
+        att_idx = full_text.lower().find("attendance")
+        if att_idx != -1:
+            best = min(paren_all, key=lambda m: abs(m.start() - att_idx))
+            val = float(best.group(1))
+            if 0 <= val <= 100:
+                return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
+        else:
+            # choose the decimal value if present (prefer decimals)
+            decimals = [float(m.group(1)) for m in paren_all if '.' in m.group(1) and 0 <= float(m.group(1)) <= 100]
+            if decimals:
+                val = max(decimals)
+                return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
+
+    # 4) Fallback: scan page for numbers not part of dates and pick sensible candidate
     all_nums = []
     for m in re.finditer(r"(\d{1,3}(?:\.\d{1,2})?)", full_text):
         s,e = m.start(), m.end()
         if is_part_of_date(full_text, s, e):
             continue
-        num = float(m.group(1))
-        if 0 <= num <= 100:
-            all_nums.append(num)
+        val = float(m.group(1))
+        if 0 <= val <= 100:
+            all_nums.append(val)
 
     if all_nums:
-        # prefer a decimal value (attendance often has decimals), otherwise prefer the largest reasonable
+        # prefer decimal numbers (attendance often has decimals)
         decimals = [n for n in all_nums if not n.is_integer()]
         if decimals:
             val = max(decimals)
@@ -148,11 +168,9 @@ def extract_attendance(html):
             val = max(all_nums)
         return (str(val).rstrip('0').rstrip('.') if '.' in str(val) else str(int(val))) + "%"
 
-    # nothing found
-    # debug output to aid troubleshooting
+    # 5) Nothing found — print debug snippet for troubleshooting
     print("DEBUG: Couldn't find attendance automatically.")
-    # Print some context to logs (first 800 chars)
-    print("PAGE_SNIPPET:", full_text[:800])
+    print("PAGE_SNIPPET:", full_text[:1200])
     return "Not Found"
 
 def send_whatsapp_message(attendance):
