@@ -2,9 +2,10 @@ name: Attendance Notifier (Playwright Python + Twilio)
 
 on:
   schedule:
-    - cron: '26 12 * * *'   # 05:56 PM IST
+    # GitHub Actions cron uses UTC.
+    # 06:00 PM IST = 12:30 PM UTC
+    - cron: '30 12 * * *'
   workflow_dispatch: {}
-
 
 jobs:
   run-playwright-python:
@@ -49,7 +50,7 @@ jobs:
 
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # install browsers separately, no --with-deps
+          # install browsers only (no system deps)
           python -m playwright install chromium
 
       - name: Run Playwright attendance script
