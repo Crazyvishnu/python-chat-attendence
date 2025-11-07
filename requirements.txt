@@ -1,4 +1,2 @@
-twilio
-python-dotenv
-selenium
-requests
+selenium==4.25.0
+twilio==9.2.3
