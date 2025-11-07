@@ -1,5 +1,5 @@
 // playwright_attendance.js
-// Node script: uses Playwright to render the page, extract attendance and send via Twilio.
+// Node + Playwright: improved DOM-aware extractor for the MGIT portal
 
 const { chromium } = require('playwright');
 const twilio = require('twilio');
@@ -19,33 +19,8 @@ if (!COLLEGE_USER || !COLLEGE_PASS || !MY_PHONE_NUMBER || !TWILIO_PHONE_NUMBER |
   process.exit(1);
 }
 
-function findClosestMatchToAttendance(text, matches) {
-  const attIndex = text.toLowerCase().indexOf('attendance');
-  if (attIndex === -1) {
-    // pick the most sensible match (prefer decimals, prefer <=100)
-    let dec = matches.filter(m => m.includes('.')).map(m => parseFloat(m));
-    dec = dec.filter(n => !isNaN(n) && n >= 0 && n <= 100);
-    if (dec.length) return dec.sort((a,b)=>b-a)[0] + '%';
-    const nums = matches.map(m => parseFloat(m)).filter(n => !isNaN(n) && n >= 0 && n <= 100);
-    if (nums.length) return nums.sort((a,b)=>b-a)[0] + '%';
-    return null;
-  }
-  // choose match whose index is closest to attIndex
-  let best = null;
-  let bestDist = Infinity;
-  for (const m of matches) {
-    const idx = text.indexOf(m);
-    if (idx === -1) continue;
-    const dist = Math.abs(idx - attIndex);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = m;
-    }
-  }
-  if (!best) return null;
-  const n = parseFloat(best);
-  if (isNaN(n) || n < 0 || n > 100) return null;
-  return (best.includes('.') ? String(parseFloat(best)) : String(Math.round(parseFloat(best)))) + '%';
+function numericOk(n) {
+  return !isNaN(n) && n >= 0 && n <= 100;
 }
 
 (async () => {
@@ -56,20 +31,23 @@ function findClosestMatchToAttendance(text, matches) {
   try {
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Try to find username and password fields and fill them.
-    // Use several selectors to be robust.
+    // Fill username/password by trying several selectors
     const usernameSelectors = [
       'input[type="text"]',
       'input[type="email"]',
       'input[name*=user]',
       'input[name*=email]',
       'input[id*=user]',
-      'input[id*=email]'
+      'input[id*=email]',
+      'input[name*=username]',
+      'input[id*=username]'
     ];
     const passwordSelectors = [
       'input[type="password"]',
       'input[name*=pass]',
-      'input[id*=pass]'
+      'input[id*=pass]',
+      'input[name*=pwd]',
+      'input[id*=pwd]'
     ];
 
     let filledUser = false;
@@ -92,135 +70,163 @@ function findClosestMatchToAttendance(text, matches) {
       }
     }
 
-    // If password field found, press Enter on it to submit; else try generic submit buttons
+    // Submit: try pressing Enter then try clicking submit button if needed
     if (filledPass) {
-      // try to press Enter on password field
-      try {
-        await page.keyboard.press('Enter');
-      } catch (e) {
-        // ignore
-      }
-    } else {
-      // try basic submit buttons
-      const submitSel = await page.$('button[type="submit"], input[type="submit"], button');
-      if (submitSel) {
-        await submitSel.click();
+      await page.keyboard.press('Enter').catch(()=>{});
+    }
+    // small wait for possible JS submit
+    await page.waitForTimeout(1500);
+
+    // If still on login page, try clicking submit buttons
+    if ((await page.url()).includes('index.php')) {
+      const submitBtn = await page.$('button[type="submit"], input[type="submit"], a[href*="login"], button:has-text("Login"), button:has-text("Sign in")');
+      if (submitBtn) {
+        await submitBtn.click().catch(()=>{});
       }
     }
 
-    // Wait for possible navigation / JS rendering
-    await page.waitForTimeout(3000);
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(()=>{});
+    // Wait for navigation and rendering
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(()=>{});
+    await page.waitForTimeout(1500);
 
-    // If still on login page (no change), try clicking the first anchor or reload dashboard URL
-    const currentUrl = page.url();
-    if (currentUrl.includes('index.php') && currentUrl === LOGIN_URL) {
-      // try to navigate to dashboard explicitly
+    // Ensure dashboard loaded - try direct navigate if necessary
+    if ((await page.url()).includes('index.php')) {
       await page.goto(DASHBOARD_URL, { waitUntil: 'domcontentloaded' }).catch(()=>{});
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1500);
     }
 
-    // get page text (rendered)
-    const renderedText = await page.textContent('body');
-
-    // 1) find explicit percentages like '72.29%' or '72%'
-    const pctRegex = /(\d{1,3}(?:\.\d{1,2})?)\s*%/g;
-    const pctMatches = [];
-    let m;
-    while ((m = pctRegex.exec(renderedText)) !== null) {
-      pctMatches.push(m[1]); // numeric part
-    }
-    if (pctMatches.length) {
-      // choose one closest to "Attendance"
-      const chosen = findClosestMatchToAttendance(renderedText, pctMatches);
-      if (chosen) {
-        console.log('EXTRACTED_ATTENDANCE', chosen);
-        // send via Twilio
-        const client = twilio(TWILIO_SID, TWILIO_TOKEN);
-        const body = `📢 College Attendance Update\nYour current attendance is: ${chosen}\n🕒 Have a great day!`;
-        const msg = await client.messages.create({
-          body,
-          from: `whatsapp:${TWILIO_PHONE_NUMBER}`,
-          to: `whatsapp:${MY_PHONE_NUMBER}`
-        });
-        console.log('SENT_SID', msg.sid);
-        await browser.close();
-        process.exit(0);
+    // --------- DOM-aware extraction ---------
+    const result = await page.evaluate(() => {
+      // helper inside page
+      function isDateContext(text, idx, len) {
+        const before = text.slice(Math.max(0, idx - 6), idx);
+        const after = text.slice(idx + len, idx + len + 6);
+        return before.includes('-') || after.includes('-') || before.includes('/') || after.includes('/');
       }
-    }
 
-    // 2) find numbers inside parentheses like (72.29)
-    const parenRegex = /\((\d{1,3}(?:\.\d{1,2})?)\)/g;
-    const parenMatches = [];
-    while ((m = parenRegex.exec(renderedText)) !== null) {
-      parenMatches.push(m[1]);
-    }
-    if (parenMatches.length) {
-      const chosen = findClosestMatchToAttendance(renderedText, parenMatches);
-      if (chosen) {
-        console.log('EXTRACTED_ATTENDANCE', chosen);
-        const client = twilio(TWILIO_SID, TWILIO_TOKEN);
-        const body = `📢 College Attendance Update\nYour current attendance is: ${chosen}\n🕒 Have a great day!`;
-        const msg = await client.messages.create({
-          body,
-          from: `whatsapp:${TWILIO_PHONE_NUMBER}`,
-          to: `whatsapp:${MY_PHONE_NUMBER}`
-        });
-        console.log('SENT_SID', msg.sid);
-        await browser.close();
-        process.exit(0);
+      function findNumericTokens(text) {
+        const re = /(\d{1,3}(?:\.\d{1,2})?)/g;
+        const out = [];
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          out.push({ token: m[1], index: m.index, len: m[1].length });
+        }
+        return out;
       }
-    }
 
-    // 3) fallback: locate 'Attendance' text node and search nearby DOM text
-    const attendanceHandles = await page.$$('text=/Attendance/i');
-    if (attendanceHandles.length) {
-      // get full page HTML and find the nearest numeric token programmatically
-      const html = await page.content();
-      // strip tags to get text with positions
-      const plain = await page.textContent('body');
-      const numRegex = /(\d{1,3}(?:\.\d{1,2})?)/g;
-      const nums = [];
-      while ((m = numRegex.exec(plain)) !== null) {
-        // simple date check: avoid tokens that are part of date pattern (like 07-11-2025)
-        const start = m.index;
-        const before = plain.slice(Math.max(0, start-6), start);
-        const after = plain.slice(start + m[1].length, start + m[1].length + 6);
-        if (before.includes('-') || after.includes('-') || before.includes('/') || after.includes('/')) continue;
-        nums.push({token: m[1], index: start});
-      }
-      // choose token nearest to 'attendance'
-      const attIndex = plain.toLowerCase().indexOf('attendance');
-      if (nums.length && attIndex !== -1) {
-        nums.sort((a,b)=>Math.abs(a.index-attIndex)-Math.abs(b.index-attIndex));
-        const n = parseFloat(nums[0].token);
-        if (!isNaN(n) && n >= 0 && n <= 100) {
-          const chosen = (String(n).includes('.') ? String(parseFloat(n)) : String(Math.round(n))) + '%';
-          console.log('EXTRACTED_ATTENDANCE', chosen);
-          const client = twilio(TWILIO_SID, TWILIO_TOKEN);
-          const body = `📢 College Attendance Update\nYour current attendance is: ${chosen}\n🕒 Have a great day!`;
-          const msg = await client.messages.create({
-            body,
-            from: `whatsapp:${TWILIO_PHONE_NUMBER}`,
-            to: `whatsapp:${MY_PHONE_NUMBER}`
-          });
-          console.log('SENT_SID', msg.sid);
-          await browser.close();
-          process.exit(0);
+      // 1) Try to find elements that contain the word "Attendance"
+      const attNodes = Array.from(document.querySelectorAll('body *')).filter(n => {
+        try {
+          return /\bAttendance\b/i.test(n.innerText || '');
+        } catch (e) { return false; }
+      });
+
+      const pageText = document.body.innerText || '';
+
+      for (const node of attNodes) {
+        // search inside closest meaningful container: node, node.parentElement, node.closest('td,div,section,table')
+        const containers = [];
+        containers.push(node);
+        if (node.parentElement) containers.push(node.parentElement);
+        const closest = node.closest('td,div,section,article,table,tbody') || node.parentElement;
+        if (closest) containers.push(closest);
+
+        // add siblings of parent to the search space (sometimes value is in sibling cell)
+        if (node.parentElement && node.parentElement.parentElement) {
+          const siblings = Array.from(node.parentElement.parentElement.children || []);
+          containers.push(...siblings);
+        }
+
+        // dedupe containers
+        const uniqContainers = Array.from(new Set(containers));
+
+        for (const c of uniqContainers) {
+          const text = c.innerText || '';
+          // a) look for explicit percent first
+          const pctMatch = text.match(/(\d{1,3}(?:\.\d{1,2})?)\s*%/);
+          if (pctMatch && Number(pctMatch[1]) <= 100) {
+            return { found: true, value: (pctMatch[1].replace(/\.?0+$/,'') + '%'), method: 'percent-in-container' };
+          }
+          // b) look for parentheses like (72.29)
+          const parenMatch = text.match(/\((\d{1,3}(?:\.\d{1,2})?)\)/);
+          if (parenMatch && Number(parenMatch[1]) <= 100) {
+            return { found: true, value: (parenMatch[1].replace(/\.?0+$/,'') + '%'), method: 'paren-in-container' };
+          }
+          // c) find numeric tokens in container and pick sensible one not part of date
+          const tokens = findNumericTokens(text);
+          if (tokens.length) {
+            for (const t of tokens) {
+              if (isDateContext(text, t.index, t.len)) continue;
+              const num = Number(t.token);
+              if (!isNaN(num) && num >= 0 && num <= 100) {
+                return { found: true, value: (String(num).replace(/\.?0+$/,'') + '%'), method: 'token-in-container' };
+              }
+            }
+          }
         }
       }
+
+      // 2) If not found via Attendance label, search for parentheses anywhere but avoid dates
+      const allText = document.body.innerText || '';
+      const parenAll = Array.from(allText.matchAll(/\((\d{1,3}(?:\.\d{1,2})?)\)/g)).map(m => ({v: m[1], idx: m.index}));
+      if (parenAll.length) {
+        for (const p of parenAll) {
+          if (!isDateContext(allText, p.idx, String(p.v).length)) {
+            const n = Number(p.v);
+            if (!isNaN(n) && n >= 0 && n <= 100) {
+              return { found: true, value: (String(n).replace(/\.?0+$/,'') + '%'), method: 'paren-anywhere' };
+            }
+          }
+        }
+      }
+
+      // 3) search for explicit percent anywhere and choose one nearest to the word "Attendance"
+      const pctAll = Array.from(allText.matchAll(/(\d{1,3}(?:\.\d{1,2})?)\s*%/g)).map(m => ({v: m[1], idx: m.index}));
+      if (pctAll.length) {
+        const attIdx = allText.toLowerCase().indexOf('attendance');
+        if (attIdx >= 0) {
+          pctAll.sort((a,b) => Math.abs(a.idx - attIdx) - Math.abs(b.idx - attIdx));
+          const n = Number(pctAll[0].v);
+          if (!isNaN(n) && n >= 0 && n <= 100) return { found: true, value: (String(n).replace(/\.?0+$/,'') + '%'), method: 'pct-anywhere-near-att' };
+        } else {
+          // fallback pick largest sensible pct
+          const nums = pctAll.map(x => Number(x.v)).filter(x => !isNaN(x) && x >= 0 && x <= 100);
+          if (nums.length) {
+            const n = Math.max(...nums);
+            return { found: true, value: (String(n).replace(/\.?0+$/,'') + '%'), method: 'pct-anywhere-largest' };
+          }
+        }
+      }
+
+      return { found: false, snippet: allText.slice(0, 2000) };
+    });
+
+    if (result && result.found) {
+      console.log('EXTRACTED_ATTENDANCE', result.value, 'method=' + (result.method || 'unknown'));
+      // send Twilio message
+      const client = twilio(TWILIO_SID, TWILIO_TOKEN);
+      const body = `📢 College Attendance Update\nYour current attendance is: ${result.value}\n🕒 Have a great day!`;
+      const msg = await client.messages.create({
+        body,
+        from: `whatsapp:${TWILIO_PHONE_NUMBER}`,
+        to: `whatsapp:${MY_PHONE_NUMBER}`
+      });
+      console.log('SENT_SID', msg.sid);
+      await browser.close();
+      process.exit(0);
     }
 
-    // Nothing found: debug output
+    // If extraction failed - log snippet for debugging
     console.error('DEBUG: Unable to extract attendance automatically.');
-    console.error('PAGE_SNIPPET:', renderedText.slice(0, 1500));
-    // Optionally send a debug message to you (comment out if you don't want page content sent)
-    // const client = twilio(TWILIO_SID, TWILIO_TOKEN);
-    // await client.messages.create({ body: `Attendance extractor failed. Check logs.`, from: `whatsapp:${TWILIO_PHONE_NUMBER}`, to: `whatsapp:${MY_PHONE_NUMBER}` });
+    if (result && result.snippet) {
+      console.error('PAGE_SNIPPET:', result.snippet);
+    } else {
+      const txt = await page.textContent('body').catch(()=>'');
+      console.error('PAGE_SNIPPET:', (txt || '').slice(0, 2000));
+    }
 
     await browser.close();
     process.exit(2);
-
   } catch (err) {
     console.error('ERROR:', err);
     await browser.close();
