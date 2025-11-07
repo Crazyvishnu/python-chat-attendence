@@ -1,5 +1,4 @@
 twilio
 python-dotenv
-schedule
-time
 selenium
+requests
