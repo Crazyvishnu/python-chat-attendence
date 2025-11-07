@@ -1,83 +1,85 @@
 import os
-import re
 import time
-from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from twilio.rest import Client
 
-# -------------------------------
-# Scrape Attendance Function
-# -------------------------------
+# Load credentials from GitHub Secrets (environment variables)
+COLLEGE_USER = os.getenv("COLLEGE_USER")
+COLLEGE_PASS = os.getenv("COLLEGE_PASS")
+TWILIO_SID = os.getenv("TWILIO_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
+TWILIO_PHONE = os.getenv("TWILIO_PHONE_NUMBER")
+MY_PHONE = os.getenv("MY_PHONE_NUMBER")
+
 def get_attendance():
-    """Scrape attendance from MGIT Winnou"""
+    """Login to MGIT Winnou and scrape attendance percentage."""
+    print("🌐 Opening MGIT Winnou site...")
+
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
 
-    driver = webdriver.Chrome(options=options)
-    driver.set_window_size(1920, 1080)
+    browser = webdriver.Chrome(options=options)
+    browser.set_page_load_timeout(90)
 
     try:
-        print("🌐 Opening MGIT Winnou site...")
-        driver.get("https://mgit.winnou.net/")
-        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.NAME, "username")))
+        browser.get("https://mgit.winnou.net/")
 
         print("🔐 Logging in...")
-        driver.find_element(By.NAME, "username").send_keys(os.getenv("COLLEGE_USER"))
-        driver.find_element(By.NAME, "passwd").send_keys(os.getenv("COLLEGE_PASS"))
-        driver.find_element(By.NAME, "SubmitL").click()
+        user_field = browser.find_element(By.NAME, "username")
+        pass_field = browser.find_element(By.NAME, "passwd")
+        user_field.send_keys(COLLEGE_USER)
+        pass_field.send_keys(COLLEGE_PASS)
+        browser.find_element(By.NAME, "SubmitL").click()
         time.sleep(3)
 
         print("📄 Navigating to Student Info...")
-        driver.find_element(By.LINK_TEXT, "Student Info").click()
-        time.sleep(3)
+        try:
+            student_info_link = browser.find_element(By.XPATH, "//a[contains(text(),'Student Info')]")
+            student_info_link.click()
+            time.sleep(3)
+        except Exception:
+            pass  # already on page
 
-        html = driver.page_source
-        match = re.search(r'(\d{2,3}\.\d{1,2})\s*%', html)
-        percent = match.group(1) if match else "Not Found"
-        print(f"🎯 Attendance Extracted: {percent}%")
-        return percent
+        # Look for Attendance text
+        cells = browser.find_elements(By.TAG_NAME, "td")
+        attendance = "Not Found"
+        for i, cell in enumerate(cells):
+            if "Attendance" in cell.text:
+                if i + 1 < len(cells):
+                    attendance = cells[i + 1].text.strip()
+                break
+
+        print("🎯 Attendance Extracted:", attendance)
+        return attendance + "%" if "%" not in attendance else attendance
 
     except Exception as e:
         print("❌ Error scraping attendance:", e)
         return "Error"
     finally:
-        driver.quit()
+        browser.quit()
 
-# -------------------------------
-# Send WhatsApp Message via Twilio
-# -------------------------------
 def send_whatsapp_message(body):
+    """Send a WhatsApp message using Twilio."""
     print("📩 Sending WhatsApp message...")
-    client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
+    client = Client(TWILIO_SID, TWILIO_TOKEN)
     message = client.messages.create(
-        from_=os.getenv("TWILIO_PHONE_NUMBER"),
-        to=os.getenv("MY_PHONE_NUMBER"),
+        from_=TWILIO_PHONE,
+        to=MY_PHONE,
         body=body
     )
-    print("✅ WhatsApp Message Sent! SID:", message.sid)
+    print("✅ Message sent! SID:", message.sid)
 
-# -------------------------------
-# Main Logic
-# -------------------------------
 def main():
-    now = datetime.now()
-    current_hour = now.hour
     attendance = get_attendance()
-
-    if attendance == "Error":
-        body = "⚠️ Attendance scraping failed. Check MGIT portal manually."
-    elif 5 <= current_hour < 12:
-        body = f"☀️ Good morning Sahitya!\nYour current attendance is: {attendance}%"
+    if "Error" not in attendance:
+        body = f"🎓 Your current attendance: {attendance}"
+        send_whatsapp_message(body)
     else:
-        body = f"🌙 Evening update, Sahitya!\nYour current attendance is: {attendance}%"
-
-    send_whatsapp_message(body)
+        send_whatsapp_message("⚠️ Failed to fetch attendance today.")
 
 if __name__ == "__main__":
     main()
