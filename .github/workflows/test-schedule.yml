@@ -11,3 +11,4 @@ jobs:
     steps:
       - name: Print time
         run: date -u && echo "Scheduled run OK"
+# Trigger schedule refresh
