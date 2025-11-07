@@ -2,7 +2,9 @@ name: Attendance Notifier (Playwright Python + Twilio)
 
 on:
   schedule:
-    - cron: '45 13 * * *'   # every day at 7:15 PM IST
+    # GitHub Actions cron is UTC
+    - cron: '0 3 * * *'     # 08:30 AM IST  => 03:00 UTC
+    - cron: '0 11 * * *'    # 04:30 PM IST  => 11:00 UTC
   workflow_dispatch: {}
 
 jobs:
