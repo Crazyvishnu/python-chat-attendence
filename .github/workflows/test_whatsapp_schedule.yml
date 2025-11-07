@@ -2,7 +2,7 @@ name: WhatsApp Cron Test (Every 5 Minutes)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # runs every 5 minutes (UTC)
+    - cron: '*/5 * * * *'   # every 5 minutes (UTC)
   workflow_dispatch: {}
 
 jobs:
@@ -11,7 +11,6 @@ jobs:
     steps:
       - name: Install Python & Twilio
         run: |
-          sudo apt-get update
           python -m pip install --upgrade pip
           pip install twilio pytz
 
@@ -24,24 +23,21 @@ jobs:
         run: |
           python <<'PYCODE'
           from datetime import datetime
-          import pytz
+          import pytz, os
           from twilio.rest import Client
-          import os
 
-          # timezone
           ist = pytz.timezone("Asia/Kolkata")
           now = datetime.now(ist).strftime("%d-%b-%Y %I:%M %p")
 
-          sid = os.getenv("TWILIO_SID")
-          token = os.getenv("TWILIO_TOKEN")
+          sid = os.environ["TWILIO_SID"]
+          token = os.environ["TWILIO_TOKEN"]
           client = Client(sid, token)
 
           body = f"✅ GitHub Cron Test:\nWorkflow ran successfully at {now} (IST)"
           msg = client.messages.create(
               body=body,
-              from_=f"whatsapp:{os.getenv('TWILIO_PHONE_NUMBER')}",
-              to=f"whatsapp:{os.getenv('MY_PHONE_NUMBER')}"
+              from_=f"whatsapp:{os.environ['TWILIO_PHONE_NUMBER']}",
+              to=f"whatsapp:{os.environ['MY_PHONE_NUMBER']}"
           )
-
           print("SENT_SID:", msg.sid)
           PYCODE
