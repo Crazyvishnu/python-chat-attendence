@@ -2,10 +2,9 @@ name: Attendance Notifier (Playwright Python + Twilio)
 
 on:
   schedule:
-    # GitHub Actions cron is UTC
-    - cron: '0 3 * * *'     # 08:30 AM IST  => 03:00 UTC
-    - cron: '0 11 * * *'    # 04:30 PM IST  => 11:00 UTC
-  workflow_dispatch: {}
+    # GitHub Actions cron uses UTC time
+    - cron: '35 6 * * *'   # ⏰ Runs daily at 12:05 PM IST
+  workflow_dispatch: {}     # allow manual run
 
 jobs:
   run-playwright-python:
@@ -23,7 +22,7 @@ jobs:
       - name: Install dependencies (Python + Playwright system packages)
         run: |
           sudo apt-get update
-          # 🧩 install missing libraries for Ubuntu 24.04 (Noble)
+          # 🧩 Install required libraries for Ubuntu 24.04 (Noble)
           sudo apt-get install -y \
             libasound2t64 \
             libx264-164 \
@@ -50,7 +49,6 @@ jobs:
 
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # install browsers only (no system deps)
           python -m playwright install chromium
 
       - name: Run Playwright attendance script
