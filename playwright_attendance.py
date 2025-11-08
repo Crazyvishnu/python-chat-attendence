@@ -1,313 +1,151 @@
-# playwright_attendance.py
-# Python (async) Playwright + Twilio script.
-# Reads secrets from environment:
-# COLLEGE_USER, COLLEGE_PASS, MY_PHONE_NUMBER, TWILIO_PHONE_NUMBER, TWILIO_SID, TWILIO_TOKEN
-
+# playwright_scripts/playwright_attendance.py
 import os
 import asyncio
-import re
-import sys
+import json
+import time
+import traceback
 from pathlib import Path
-from twilio.rest import Client
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-LOGIN_URL = "https://mgit.winnou.net/index.php"
-DASHBOARD_URL = "https://mgit.winnou.net/index.php"
-
-COLLEGE_USER = os.getenv("COLLEGE_USER")
-COLLEGE_PASS = os.getenv("COLLEGE_PASS")
-MY_PHONE_NUMBER = os.getenv("MY_PHONE_NUMBER")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
-TWILIO_SID = os.getenv("TWILIO_SID")
-TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
-
-DIAG_SCREEN = Path("diagnostic_screenshot.png")
-DIAG_HTML = Path("diagnostic_page.html")
-FATAL_SCREEN = Path("fatal_error_screenshot.png")
+# output files
+DIAGNOSTIC_HTML = Path("diagnostic_page.html")
+DIAGNOSTIC_SCREENSHOT = Path("diagnostic_screenshot.png")
 FATAL_HTML = Path("fatal_error_page.html")
+FATAL_SCREENSHOT = Path("fatal_error_screenshot.png")
+RESULT_JSON = Path("result.json")
 
+COL_USER = os.getenv("COLLEGE_USER")
+COL_PASS = os.getenv("COLLEGE_PASS")
+BASE_URL = os.getenv("COLLEGE_URL", "https://mgit.winnou.net/index.php")
+MAX_RETRIES = 3
 
-def enough_env():
-    return all([COLLEGE_USER, COLLEGE_PASS, MY_PHONE_NUMBER, TWILIO_PHONE_NUMBER, TWILIO_SID, TWILIO_TOKEN])
-
-
-async def run():
-    if not enough_env():
-        print("Missing required environment variables. Exiting.", file=sys.stderr)
-        sys.exit(1)
+async def fetch_attendance():
+    # basic result template
+    result = {"success": False, "attendance": None, "error": None}
+    if not COL_USER or not COL_PASS:
+        result["error"] = "Missing COLLEGE_USER or COLLEGE_PASS environment variables"
+        RESULT_JSON.write_text(json.dumps(result))
+        return result
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context()
-        page = await context.new_page()
-
+        page = await browser.new_page()
         try:
-            print("🔵 Opening login page...")
-            await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-
-            # Try to find username/password inputs using multiple selectors
-            username_selectors = [
-                'input[name*=user]', 'input[id*=user]', 'input[name*=roll]', 'input[id*=roll]',
-                'input[type="text"]', 'input[type="email"]'
-            ]
-            password_selectors = [
-                'input[type="password"]', 'input[name*=pass]', 'input[id*=pass]', 'input[name*=pwd]', 'input[id*=pwd]'
-            ]
-
-            user_found = False
-            pass_found = False
-
-            for sel in username_selectors:
-                el = await page.query_selector(sel)
-                if el:
-                    await el.fill(COLLEGE_USER)
-                    user_found = True
-                    break
-
-            for sel in password_selectors:
-                el = await page.query_selector(sel)
-                if el:
-                    await el.fill(COLLEGE_PASS)
-                    pass_found = True
-                    break
-
-            # fallback scanning inputs by attributes
-            if not user_found or not pass_found:
-                inputs = await page.query_selector_all("input")
-                for inp in inputs:
-                    try:
-                        placeholder = (await inp.get_attribute("placeholder") or "").lower()
-                        name = (await inp.get_attribute("name") or "").lower()
-                        _id = (await inp.get_attribute("id") or "").lower()
-                        _type = (await inp.get_attribute("type") or "").lower()
-                    except Exception:
-                        continue
-                    if not user_found and ("user" in placeholder or "roll" in placeholder or "user" in name or "user" in _id or "roll" in name or "roll" in _id):
-                        await inp.fill(COLLEGE_USER)
-                        user_found = True
-                    if not pass_found and (_type == "password" or "pass" in name or "pass" in _id or "password" in placeholder):
-                        await inp.fill(COLLEGE_PASS)
-                        pass_found = True
-                    if user_found and pass_found:
-                        break
-
-            if not user_found or not pass_found:
-                print("❌ Could not locate login fields reliably. Saving screenshot for debugging.")
-                await page.screenshot(path=DIAG_SCREEN, full_page=True)
-                await browser.close()
-                sys.exit(2)
-
-            print("🔑 Credentials entered. Attempting login...")
-            # submit: Enter then try clicking submit buttons if needed
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(1200)
-
-            if "index.php" in page.url:
-                submit_btn = await page.query_selector('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Sign in"), a:has-text("Login")')
-                if submit_btn:
-                    try:
-                        await submit_btn.click()
-                    except Exception:
-                        pass
-
-            # wait for load/render
-            try:
-                await page.wait_for_load_state("networkidle", timeout=20000)
-            except Exception:
-                pass
-            await page.wait_for_timeout(1500)
-
-            # Click "Student Info" explicitly
-            nav_clicked = None
-            try:
-                exact = await page.query_selector('text="Student Info"')
-                if exact:
-                    await exact.click()
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:
-                        pass
-                    await page.wait_for_timeout(900)
-                    body = (await page.inner_text("body")).lower()
-                    if "present term" in body or "attendance" in body:
-                        nav_clicked = "Student Info (exact)"
-            except Exception:
-                pass
-
-            if not nav_clicked:
-                # try partial matches
-                elems = await page.query_selector_all("a,button,li,span")
-                for el in elems:
-                    try:
-                        txt = (await el.inner_text()).strip()
-                    except Exception:
-                        continue
-                    if not txt:
-                        continue
-                    if "student info" in txt.lower():
-                        try:
-                            await el.click()
-                        except Exception:
-                            pass
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=8000)
-                        except Exception:
-                            pass
-                        await page.wait_for_timeout(900)
-                        body = (await page.inner_text("body")).lower()
-                        if "present term" in body or "attendance" in body:
-                            nav_clicked = f"Student Info (partial: {txt[:40]})"
-                            break
-
-            if not nav_clicked:
-                # last resort: reload dashboard url
+            # Try a few attempts for flaky network/pages
+            for attempt in range(1, MAX_RETRIES + 1):
                 try:
-                    await page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
-                except Exception:
-                    pass
-                await page.wait_for_timeout(900)
-                body = (await page.inner_text("body")).lower()
-                if "present term" in body or "attendance" in body:
-                    nav_clicked = "direct-dashboard"
+                    await page.goto(BASE_URL, timeout=90000)  # 90s
+                    await page.wait_for_load_state("networkidle", timeout=45000)
+                    break
+                except PWTimeout:
+                    if attempt == MAX_RETRIES:
+                        raise
+                    else:
+                        await page.screenshot(path=f"retry_nav_{attempt}.png")
+                        time.sleep(2 ** attempt)
+            # Save initial diagnostic HTML + screenshot
+            DIAGNOSTIC_HTML.write_text(await page.content(), encoding="utf-8")
+            await page.screenshot(path=str(DIAGNOSTIC_SCREENSHOT), full_page=True)
 
-            print("NAV_CLICKED:", nav_clicked or "none")
-            await page.wait_for_timeout(900)
+            # Detect simple CAPTCHA / challenge markers
+            # (the login page includes #captcha input; also look for 'captcha' keywords)
+            content_lower = (await page.content()).lower()
+            if ("captcha" in content_lower) or (await page.query_selector("#captcha") is not None):
+                result["error"] = "CAPTCHA detected on login page; cannot automate."
+                RESULT_JSON.write_text(json.dumps(result))
+                return result
 
-            # Use a JS DOM-aware extractor (runs in page context) — returns a dict-like object
-            extractor_js = r'''
-            () => {
-              function stripZeros(s){ return s.replace(/\.?0+$/,''); }
-              function isDateContext(text, idx, len){
-                const before = text.slice(Math.max(0, idx - 6), idx);
-                const after = text.slice(idx + len, idx + len + 6);
-                return before.includes('-') || after.includes('-') || before.includes('/') || after.includes('/');
-              }
+            # Fill login form (selectors observed in diagnostic HTML)
+            # update these selectors if site changes
+            await page.fill("#username", COL_USER)
+            await page.fill("#modlgn_passwd", COL_PASS)
 
-              // 1) Present Term container
-              const presentNodes = Array.from(document.querySelectorAll('body *')).filter(n => {
-                try { return /\bPresent Term\b/i.test(n.innerText || ''); } catch(e){ return false; }
-              });
-              for (const pn of presentNodes) {
-                const container = pn.closest('div') || pn.parentElement;
-                if (!container) continue;
-                const text = container.innerText || '';
-                const pct = text.match(/(\d{1,3}(?:\.\d{1,2})?)\s*%/);
-                if (pct && Number(pct[1]) <= 100) return {found:true, value: stripZeros(pct[1]) + '%', method:'presentterm-percent'};
-                const par = text.match(/\((\d{1,3}(?:\.\d{1,2})?)\)/);
-                if (par && Number(par[1]) <= 100) return {found:true, value: stripZeros(par[1]) + '%', method:'presentterm-paren'};
-                const re = /(\d{1,3}(?:\.\d{1,2})?)/g;
-                let m;
-                while ((m = re.exec(text)) !== null) {
-                  if (isDateContext(text, m.index, m[1].length)) continue;
-                  const n = Number(m[1]);
-                  if (!isNaN(n) && n>=0 && n<=100) return {found:true, value: stripZeros(String(n))+'%', method:'presentterm-token'};
-                }
-              }
+            # Click sign-in button (class 'signinbutton' in uploaded HTML)
+            sign_button = await page.query_selector("input.signinbutton") or await page.query_selector("input[type=submit]")
+            if not sign_button:
+                raise Exception("Sign-in button not found; selector may have changed.")
 
-              // 2) Attendance label vicinity
-              const attNodes = Array.from(document.querySelectorAll('body *')).filter(n => {
-                try { return /\bAttendance\b/i.test(n.innerText || ''); } catch(e){ return false; }
-              });
-              for (const node of attNodes) {
-                const parent = node.parentElement;
-                const candidates = [];
-                if (parent) {
-                  candidates.push(parent);
-                  const grand = parent.parentElement;
-                  if (grand) candidates.push(...Array.from(grand.children || []));
-                }
-                const closest = node.closest('td,div,section,table') || parent;
-                if (closest) candidates.push(closest);
-                for (const c of Array.from(new Set(candidates))) {
-                  try {
-                    const txt = c.innerText || '';
-                    let m = txt.match(/(\d{1,3}(?:\.\d{1,2})?)\s*%/);
-                    if (m && Number(m[1]) <=100) return {found:true, value: stripZeros(m[1]) + '%', method:'attendance-sibling-percent'};
-                    m = txt.match(/\((\d{1,3}(?:\.\d{1,2})?)\)/);
-                    if (m && Number(m[1]) <=100) return {found:true, value: stripZeros(m[1]) + '%', method:'attendance-sibling-paren'};
-                    const re = /(\d{1,3}(?:\.\d{1,2})?)/g; let mm;
-                    while ((mm = re.exec(txt)) !== null) {
-                      if (isDateContext(txt, mm.index, mm[1].length)) continue;
-                      const n = Number(mm[1]);
-                      if (!isNaN(n) && n>=0 && n<=100) return {found:true, value: stripZeros(String(n)) + '%', method:'attendance-sibling-token'};
-                    }
-                  } catch(e){}
-                }
-              }
+            # Submit and wait
+            await sign_button.click()
+            # Wait for navigation / dashboard to load
+            try:
+                await page.wait_for_load_state("networkidle", timeout=45000)
+            except PWTimeout:
+                # allow extra time for slow pages
+                await page.wait_for_timeout(5000)
 
-              // 3) parentheses anywhere near Attendance
-              const pageText = document.body.innerText || '';
-              const parenAll = Array.from(pageText.matchAll(/\((\d{1,3}(?:\.\d{1,2})?)\)/g)).map(m=>({v:m[1], idx:m.index}));
-              if (parenAll.length) {
-                const attIdx = pageText.toLowerCase().indexOf('attendance');
-                if (attIdx >= 0) {
-                  parenAll.sort((a,b)=> Math.abs(a.idx-attIdx) - Math.abs(b.idx-attIdx));
-                  for (const p of parenAll) {
-                    if (!isDateContext(pageText, p.idx, String(p.v).length)) {
-                      const n = Number(p.v); if (!isNaN(n) && n>=0 && n<=100) return {found:true, value: stripZeros(String(n))+'%', method:'paren-near-att'};
-                    }
-                  }
-                }
-              }
+            # Save post-login HTML for debugging
+            post_html = await page.content()
+            Path("after_login_page.html").write_text(post_html, encoding="utf-8")
+            await page.screenshot(path="after_login_screenshot.png", full_page=True)
 
-              // 4) explicit percent anywhere
-              const pctAll = Array.from(pageText.matchAll(/(\d{1,3}(?:\.\d{1,2})?)\s*%/g)).map(m=>({v:m[1], idx:m.index}));
-              if (pctAll.length) {
-                const attIdx = pageText.toLowerCase().indexOf('attendance');
-                if (attIdx >= 0) {
-                  pctAll.sort((a,b)=> Math.abs(a.idx-attIdx)-Math.abs(b.idx-attIdx));
-                  const n = Number(pctAll[0].v); if (!isNaN(n) && n>=0 && n<=100) return {found:true, value: stripZeros(String(n))+'%', method:'pct-near-att'};
-                } else {
-                  const nums = pctAll.map(x=>Number(x.v)).filter(x=>!isNaN(x) && x>=0 && x<=100);
-                  if (nums.length) { const n = Math.max(...nums); return {found:true, value: stripZeros(String(n))+'%', method:'pct-any'}; }
-                }
-              }
+            # Now try to find attendance element — you must replace the selector below
+            # with the actual selector shown on the logged-in page.
+            # Example strategies:
+            # - Search for text "attendance" in the page
+            # - Look for a known CSS id/class
+            page_text = (await page.inner_text("body")).lower()
 
-              return {found:false, snippet: pageText.slice(0,2000)};
-            }
-            '''
-
-            extraction = await page.evaluate(extractor_js)
-
-            if extraction and extraction.get("found"):
-                value = extraction.get("value")
-                method = extraction.get("method", "unknown")
-                print(f"EXTRACTED_ATTENDANCE {value} method={method}")
-                # send WhatsApp via Twilio
-                client = Client(TWILIO_SID, TWILIO_TOKEN)
-                body = f"📢 College Attendance Update\nYour current attendance is: {value}\n🕒 Have a great day!"
-                msg = client.messages.create(body=body, from_=f"whatsapp:{TWILIO_PHONE_NUMBER}", to=f"whatsapp:{MY_PHONE_NUMBER}")
-                print("SENT_SID", msg.sid)
-                await browser.close()
-                sys.exit(0)
+            # Heuristic: look for percent numbers near 'attendance'
+            if "attendance" in page_text:
+                # crude extract: find substring around 'attendance'
+                idx = page_text.find("attendance")
+                snippet = page_text[max(0, idx-200): idx+200]
+                # try to find a number like 85% in snippet
+                import re
+                m = re.search(r"(\d{1,3}\s*%|\d{1,3}\.\d\s*%)", snippet)
+                attendance_val = m.group(0) if m else None
+                if not attendance_val:
+                    # fallback: return the snippet so you can inspect manually
+                    attendance_val = "attendance found in snippet: " + snippet.strip().replace("\n"," ")
+                result.update({"success": True, "attendance": attendance_val})
+                RESULT_JSON.write_text(json.dumps(result, ensure_ascii=False))
+                return result
             else:
-                print("DEBUG: Unable to extract attendance automatically.")
-                snippet = extraction.get("snippet") if extraction else None
-                if snippet:
-                    print("PAGE_SNIPPET:", snippet)
-                # save diagnostics
-                await page.screenshot(path=DIAG_SCREEN, full_page=True)
-                content = await page.content()
-                DIAG_HTML.write_text(content, encoding="utf-8")
-                print("DIAGNOSTIC_SCREENSHOT:", str(DIAG_SCREEN))
-                print("DIAGNOSTIC_HTML:", str(DIAG_HTML))
-                await browser.close()
-                sys.exit(2)
+                # No attendance text found — maybe we need to navigate to "Attendance" page
+                # try clicking the 'Attendance' link that appears in diagnostic tags (if present)
+                att_link = await page.query_selector("a:has-text('Attendance')")
+                if att_link:
+                    await att_link.click()
+                    await page.wait_for_load_state("networkidle")
+                    await page.screenshot(path="attendance_page_screenshot.png", full_page=True)
+                    page_text2 = (await page.inner_text("body")).lower()
+                    idx = page_text2.find("attendance")
+                    snippet = page_text2[max(0, idx-200): idx+200] if idx!=-1 else page_text2[:400]
+                    import re
+                    m = re.search(r"(\d{1,3}\s*%|\d{1,3}\.\d\s*%)", snippet)
+                    attendance_val = m.group(0) if m else "attendance page loaded but no percent found"
+                    result.update({"success": True, "attendance": attendance_val})
+                    RESULT_JSON.write_text(json.dumps(result, ensure_ascii=False))
+                    return result
+
+            # nothing found
+            result["error"] = "Unable to locate attendance text after login. See after_login_page.html and screenshots."
+            RESULT_JSON.write_text(json.dumps(result))
+            return result
 
         except Exception as e:
-            print("ERROR:", e, file=sys.stderr)
+            # fatal: save everything for diagnostics
+            err = traceback.format_exc()
+            FATAL_HTML.write_text(await page.content() if page else str(err), encoding="utf-8")
+            with open("fatal_error.txt", "w", encoding="utf-8") as f:
+                f.write(err)
             try:
-                await page.screenshot(path=FATAL_SCREEN, full_page=True)
+                await page.screenshot(path=str(FATAL_SCREENSHOT), full_page=True)
             except Exception:
                 pass
-            try:
-                content = await page.content()
-                FATAL_HTML.write_text(content, encoding="utf-8")
-            except Exception:
-                pass
+            result["error"] = f"Exception: {str(e)}; see fatal_error.txt"
+            RESULT_JSON.write_text(json.dumps(result))
+            return result
+        finally:
             await browser.close()
-            sys.exit(1)
-
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    res = asyncio.run(fetch_attendance())
+    print(json.dumps(res, ensure_ascii=False))
+    if not res.get("success"):
+        # non-zero exit to indicate Playwright failure
+        raise SystemExit(2)
+    else:
+        # success
+        raise SystemExit(0)
