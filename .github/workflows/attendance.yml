@@ -2,29 +2,34 @@ name: Attendance Notifier
 
 on:
   schedule:
-    # GitHub Actions cron runs in UTC. For IST 08:30 and 16:30:
-    - cron: '03 3 * * *'   # 08:30 IST -> 03:00 UTC  (example earlier used 03:00)
-    - cron: '30 11 * * *'  # 17:00 IST -> 11:30 UTC  (adjust if needed)
+    # Example: 08:30 IST and 16:30 IST - convert to UTC (IST = UTC+5:30)
+    - cron: '03 3 * * *'   # 08:33 IST -> adjust as needed
+    - cron: '11 11 * * *'  # placeholder; change to desired UTC cron
   workflow_dispatch:
 
 jobs:
   run-scrape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Show ATTENDANCE_URL (masked)
+        run: echo "ATTENDANCE_URL is set"
+        env:
+          ATTENDANCE_URL: ${{ secrets.ATTENDANCE_URL }}
+
+      - name: Connectivity check to attendance URL
+        run: |
+          echo "curl headers for $ATTENDANCE_URL"
+          curl -I -L --max-time 20 "$ATTENDANCE_URL" || true
+        env:
+          ATTENDANCE_URL: ${{ secrets.ATTENDANCE_URL }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
-      - name: Restore attendance cache
-        id: restore-cache
-        uses: actions/cache@v4
-        with:
-          path: last_sent.json
-          key: attendance-cache-v1
 
       - name: Install dependencies
         run: |
@@ -44,9 +49,15 @@ jobs:
         run: |
           python scrape_and_notify.py
 
-      - name: Save cache
+      - name: Upload debug artifacts
         if: always()
-        uses: actions/cache@v4
+        uses: actions/upload-artifact@v4
         with:
-          path: last_sent.json
-          key: attendance-cache-v1
+          name: attendance-debug
+          path: |
+            failure_attempt_*.png
+            failure_attempt_*.html
+            failure_*.png
+            failure_*.html
+            attendance.json
+            last_sent.json
