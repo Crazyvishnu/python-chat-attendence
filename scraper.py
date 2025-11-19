@@ -1,63 +1,66 @@
+import os
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-import os
 
-MGIT_URL = "https://mgit.winnou.net/"
-LOGIN_PATH = "/index.php"
-USERNAME_FIELD = "txtusername"
-PASSWORD_FIELD = "txtpassword"
+BASE_URL = "https://mgit.winnou.net"
+LOGIN_URL = f"{BASE_URL}/index.php?option=com_user&view=login"
+ATTENDANCE_URL = "https://mgit.winnou.net/index.php?option=com_base_studentinfo&task=details&schoolid=1&Itemid=324"
 
 def login_and_get_attendance():
-
     username = os.getenv("MGIT_USERNAME")
     password = os.getenv("MGIT_PASSWORD")
 
     if not username or not password:
-        return "Username/password not set"
+        return "Missing username or password secret!"
 
-    login_url = urljoin(MGIT_URL, LOGIN_PATH)
+    session = requests.Session()
 
-    s = requests.Session()
+    # STEP 1 – Open login page to get hidden form fields
+    login_page = session.get(LOGIN_URL)
+    login_page.raise_for_status()
 
-    # Load login page
-    r = s.get(login_url, timeout=20)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
+    soup = BeautifulSoup(login_page.text, "lxml")
 
-    # collect hidden inputs
-    form = {}
-    for inp in soup.select("input[type=hidden]"):
-        if inp.get("name"):
-            form[inp.get("name")] = inp.get("value", "")
+    form = soup.find("form", {"id": "login-form"})
+    if form is None:
+        return "Unable to find login form!"
 
-    # add credentials
-    form[USERNAME_FIELD] = username
-    form[PASSWORD_FIELD] = password
+    data = {}
+    for field in form.find_all("input"):
+        name = field.get("name")
+        value = field.get("value", "")
+        if name:
+            data[name] = value
 
-    # form action
-    form_tag = soup.find("form")
-    post_url = urljoin(login_url, form_tag.get("action"))
+    # Insert credentials into form
+    data["username"] = username
+    data["passwd"] = password
 
-    # login request
-    resp = s.post(post_url, data=form)
-    resp.raise_for_status()
+    # STEP 2 – Submit login form
+    post_url = form.get("action")
+    if not post_url.startswith("http"):
+        post_url = BASE_URL + "/" + post_url.lstrip("/")
 
-    # go to attendance page
-    att_url = urljoin(MGIT_URL, "/Student/Attendance.aspx")
-    att_page = s.get(att_url)
+    login_response = session.post(post_url, data=data)
+    login_response.raise_for_status()
+
+    # STEP 3 – Access attendance page
+    att_page = session.get(ATTENDANCE_URL)
     att_page.raise_for_status()
 
-    soup2 = BeautifulSoup(att_page.text, "lxml")
-    table = soup2.find("table")
+    soup = BeautifulSoup(att_page.text, "lxml")
 
+    # Extract attendance table
+    table = soup.find("table")
     if not table:
-        return "Attendance not found."
+        return "Attendance table not found!"
 
-    rows = []
-    for tr in table.find_all("tr"):
-        cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+    rows = table.find_all("tr")
+
+    result = []
+    for tr in rows:
+        cols = [td.text.strip() for td in tr.find_all(["td", "th"])]
         if cols:
-            rows.append(" | ".join(cols))
+            result.append(" | ".join(cols))
 
-    return "\n".join(rows)
+    return "\n".join(result)
