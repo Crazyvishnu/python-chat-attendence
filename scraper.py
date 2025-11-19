@@ -4,7 +4,7 @@ from urllib.parse import urljoin
 import os
 
 MGIT_URL = "https://mgit.winnou.net/"
-LOGIN_PATH = "/Account/Login.aspx"
+LOGIN_PATH = "/index.php"
 USERNAME_FIELD = "txtusername"
 PASSWORD_FIELD = "txtpassword"
 
