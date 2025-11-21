@@ -1,20 +1,22 @@
-name: MGIT Attendance WhatsApp Bot
+
+name: MGIT Attendance Tracker
 
 on:
   schedule:
-    # 8:00 AM IST (2:30 AM UTC)
+    # 8:00 AM IST = 2:30 AM UTC
     - cron: '30 2 * * *'
-    # 4:00 PM IST (10:30 AM UTC)
+    # 4:00 PM IST = 10:30 AM UTC
     - cron: '30 10 * * *'
   
-  workflow_dispatch:  # Manual trigger
+  # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
-  send-attendance:
+  check-attendance:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
+    - name: Checkout code
       uses: actions/checkout@v3
     
     - name: Set up Python
@@ -25,14 +27,15 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests beautifulsoup4 twilio
+        pip install -r requirements.txt
     
-    - name: Run WhatsApp attendance bot
+    - name: Run attendance tracker
       env:
-        TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-        TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-        TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
-        YOUR_WHATSAPP_NUMBER: ${{ secrets.YOUR_WHATSAPP_NUMBER }}
         MGIT_USERNAME: ${{ secrets.MGIT_USERNAME }}
         MGIT_PASSWORD: ${{ secrets.MGIT_PASSWORD }}
-      run: python attendance_whatsapp.py
+        TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+        TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+        TWILIO_WHATSAPP_NUMBER: ${{ secrets.TWILIO_WHATSAPP_NUMBER }}
+        MY_WHATSAPP_NUMBER: ${{ secrets.MY_WHATSAPP_NUMBER }}
+      run: python attendance_tracker.py
+```
