@@ -1,0 +1,41 @@
+name: MGIT Attendance Notifier
+
+on:
+  schedule:
+    # Times are in UTC
+    # 08:00 AM IST = 02:30 UTC
+    # 04:00 PM IST = 10:30 UTC
+    - cron: '30 2 * * *'
+    - cron: '30 10 * * *'
+  workflow_dispatch:  # manual run button
+
+jobs:
+  run-notifier:
+    runs-on: ubuntu-latest
+
+    env:
+      MGIT_USERNAME: ${{ secrets.MGIT_USERNAME }}
+      MGIT_PASSWORD: ${{ secrets.MGIT_PASSWORD }}
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
+      MY_PHONE_NUMBER: ${{ secrets.MY_PHONE_NUMBER }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run attendance script
+        run: python scrape_and_send.py
+        
